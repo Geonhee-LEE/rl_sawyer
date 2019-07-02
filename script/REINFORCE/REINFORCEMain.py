@@ -63,12 +63,12 @@ obs_dim = env.observation_space.shape[0]
 n_act = 7 #config: act_dim #env.action_space.n
 agent = REINFORCEAgent(obs_dim, n_act, epochs=5, hdim=32, lr=3e-4,seed=seed)
 
-avg_return_list = deque(maxlen=10)
-avg_loss_list = deque(maxlen=10)
+avg_return_list = deque(maxlen=1000)
+avg_loss_list = deque(maxlen=1000)
 
 episode_size = 1
-batch_size = 64
-nupdates = 1000
+batch_size = 16
+nupdates = 10000
 
 for update in range(nupdates+1):
     #print ('update: ', update)
@@ -77,13 +77,18 @@ for update in range(nupdates+1):
     observes, actions, returns = build_train_set(trajectories)
 
     pol_loss = agent.update(observes, actions, returns, batch_size=batch_size)
+    print ("pol_loss: ", np.shape((pol_loss)))
     
     avg_loss_list.append(pol_loss)
     avg_return_list.append([np.sum(t['rewards']) for t in trajectories])
-    if (update%200) == 0:
+    
+    print ("avg_loss_list: ", np.shape((avg_loss_list)))
+    print ("avg_return_list: ", np.shape((avg_return_list)))
+
+    if (update%1)==0:
         print('[{}/{}] policy loss : {:.3f}, return : {:.3f}'.format(update, nupdates, np.mean(avg_loss_list), np.mean(avg_return_list)))
         
-    if (np.mean(avg_return_list) > 490): # Threshold return to success cartpole
+    if (np.mean(avg_return_list) > 490) and np.shape(np.mean(avg_loss_list)) == np.shape(np.mean(avg_return_list)): # Threshold return to success cartpole
         print('[{}/{}] policy loss : {:.3f}, return : {:.3f}'.format(update,nupdates, np.mean(avg_loss_list), np.mean(avg_return_list)))
         print('The problem is solved with {} episodes'.format(update*episode_size))
         break

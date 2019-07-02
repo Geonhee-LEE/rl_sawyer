@@ -10,15 +10,8 @@ import rospy
 from visualization_msgs.msg import Marker
 from std_srvs.srv import *
 
-'''
-#!/usr/bin/python3
-from sawyer_control.envs.sawyer_reaching import SawyerReachXYZEnv
-env = SawyerReachXYZEnv()
-print(env)
-env.reset()
-'''
 
-class REINFORCEEnv(SawyerReachXYZEnv):
+class PPOGAEEnv(SawyerReachXYZEnv):
     def __init__(self,
                  target_goal=(0, 0, 0),
                  indicator_threshold=.05,
@@ -31,7 +24,9 @@ class REINFORCEEnv(SawyerReachXYZEnv):
         Serializable.quick_init(self, locals())
         # inherit from SawyerReachXYZEnv
         SawyerReachXYZEnv.__init__(self)
+        self.torque_action_scale = torque_action_scale
         self.ros_init()
+        self.action_mode = action_mode
         if self.action_mode=='torque':
             self.goal_space = self.config.TORQUE_SAFETY_BOX
         else:
@@ -70,7 +65,7 @@ class REINFORCEEnv(SawyerReachXYZEnv):
         self._act(action)
         observation = self._get_obs()
         eef_pos = self._get_endeffector_pose()
-        reward = self.compute_dist_rewards(eef_pos, self._target_goal)
+        self.reward = self.compute_dist_rewards(eef_pos, self._target_goal)
         info = self._get_info()
         self.done = self.check_done()
 
@@ -84,14 +79,16 @@ class REINFORCEEnv(SawyerReachXYZEnv):
             self.done_client()
 
         #print ('action: ', action, '\n reward: ', reward, '\n  done: ', self.done)
-        return observation, reward, self.done, info
+        return observation, self.reward, self.done, info
     
     def convert_input_into_joint_torque(self, action):
-        torque_action = np.array([action[0], action[1], action[2],  action[3], action[4], action[5], action[6]]) #'right_j0', 'right_j1', 'right_j2', 'right_j3', 'right_j4', 'right_j5','right_j6'
+        torque_action = np.array([action[0], action[1], 0,  action[2], 0, 0, 0]) #'right_j0', 'right_j1', 'right_j2', 'right_j3', 'right_j4', 'right_j5','right_j6'
+        #torque_action = np.array([-1, -1, 0, -1, 0, 0, 0]) #'right_j0', 'right_j1', 'right_j2', 'right_j3', 'right_j4', 'right_j5','right_j6'
         return torque_action
 
     def check_done(self):
         if self.distances < 0.1:
+            self.reward = 100.0
             return  True      
         else:
             return False
@@ -108,7 +105,7 @@ class REINFORCEEnv(SawyerReachXYZEnv):
 
     def _safe_move_to_neutral(self):
         self.send_gripper_cmd("open")
-        delay_cnt = 13 #reset delay
+        delay_cnt = 20 #reset delay cnt
         for i in range(delay_cnt):
             cur_pos, cur_vel, _ = self.request_observation()
             torques = self.AnglePDController._compute_pd_forces(cur_pos, cur_vel)
@@ -135,7 +132,9 @@ class REINFORCEEnv(SawyerReachXYZEnv):
     def compute_dist_rewards(self, eef_pos, goals):
         #print ('goals: ', goals)
         #print ('eef_pos: ', eef_pos)
-        self.distances = np.linalg.norm(eef_pos - goals, axis=0)
+        #self.distances = np.linalg.norm(eef_pos - goals, axis=0)
+        self.distances = np.exp(np.linalg.norm(eef_pos - goals, axis=0))
+
         if self.reward_type == 'hand_distance':
             r = -self.distances
         elif self.reward_type == 'hand_success':
@@ -170,6 +169,60 @@ class REINFORCEEnv(SawyerReachXYZEnv):
                 always_show_all_stats=True,
                 ))
         return statistics
+
+    def _act(self, action):
+        if self.action_mode == 'position':
+            self._position_act(action * self.position_action_scale)
+        else:
+            #self._torque_act(action*self.torque_action_scale)
+            self._policy_torque_act(action*self.torque_action_scale)
+        return
+
+    def _position_act(self, action):
+        ee_pos = self._get_endeffector_pose()
+        endeffector_pos = ee_pos[:3]
+        endeffector_angles = ee_pos[3:]
+        target_ee_pos = (endeffector_pos + action)
+        target_ee_pos = np.clip(target_ee_pos, self.config.POSITION_SAFETY_BOX_LOWS, self.config.POSITION_SAFETY_BOX_HIGHS)
+        target_ee_pos = np.concatenate((target_ee_pos, endeffector_angles))
+        angles = self.request_ik_angles(target_ee_pos, self._get_joint_angles())
+        print ('position control angles: ', angles)
+        self.send_angle_action(angles)
+
+    # move to the goal position using torque neural network
+    def _policy_torque_act(self, action):
+        self.send_action(action)
+        self.rate.sleep()
+
+    # reset torque control
+    def _torque_act(self, action):
+        if self.use_safety_box:
+            if self.in_reset:
+                safety_box = self.config.RESET_SAFETY_BOX
+            else:
+                safety_box = self.config.TORQUE_SAFETY_BOX
+            self.get_latest_pose_jacobian_dict()
+            pose_jacobian_dict_of_joints_not_in_box = self.get_pose_jacobian_dict_of_joints_not_in_box(safety_box)
+            
+            if len(pose_jacobian_dict_of_joints_not_in_box) > 0:
+                #print('pose_jacobian_dict_of_joints_not_in_box: ', pose_jacobian_dict_of_joints_not_in_box)
+                forces_dict = self._get_adjustment_forces_per_joint_dict(pose_jacobian_dict_of_joints_not_in_box, safety_box)
+                torques = np.zeros(7)
+                for joint in forces_dict:
+                    jacobian = pose_jacobian_dict_of_joints_not_in_box[joint][1]
+                    force = forces_dict[joint]
+                    torques = torques + np.dot(jacobian.T, force).T
+                torques[-1] = 0 #we don't need to move the wrist
+                action = torques
+            
+
+        if self.in_reset: # do resetting
+            action = np.clip(action, self.config.RESET_TORQUE_LOW, self.config.RESET_TORQUE_HIGH)
+        else:
+            action = np.clip(np.asarray(action), self.config.JOINT_TORQUE_LOW, self.config.JOINT_TORQUE_HIGH)
+        
+        self.send_action(action)
+        self.rate.sleep()
 
     """
     Multitask functions

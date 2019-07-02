@@ -10,15 +10,7 @@ import rospy
 from visualization_msgs.msg import Marker
 from std_srvs.srv import *
 
-'''
-#!/usr/bin/python3
-from sawyer_control.envs.sawyer_reaching import SawyerReachXYZEnv
-env = SawyerReachXYZEnv()
-print(env)
-env.reset()
-'''
-
-class REINFORCEEnv(SawyerReachXYZEnv):
+class PPOEnv(SawyerReachXYZEnv):
     def __init__(self,
                  target_goal=(0, 0, 0),
                  indicator_threshold=.05,
@@ -70,7 +62,7 @@ class REINFORCEEnv(SawyerReachXYZEnv):
         self._act(action)
         observation = self._get_obs()
         eef_pos = self._get_endeffector_pose()
-        reward = self.compute_dist_rewards(eef_pos, self._target_goal)
+        self.reward = self.compute_dist_rewards(eef_pos, self._target_goal)
         info = self._get_info()
         self.done = self.check_done()
 
@@ -84,14 +76,15 @@ class REINFORCEEnv(SawyerReachXYZEnv):
             self.done_client()
 
         #print ('action: ', action, '\n reward: ', reward, '\n  done: ', self.done)
-        return observation, reward, self.done, info
+        return observation, self.reward, self.done, info
     
     def convert_input_into_joint_torque(self, action):
-        torque_action = np.array([action[0], action[1], action[2],  action[3], action[4], action[5], action[6]]) #'right_j0', 'right_j1', 'right_j2', 'right_j3', 'right_j4', 'right_j5','right_j6'
+        torque_action = np.array([action[0, 0], action[0, 1], action[0, 2],  action[0, 3], action[0, 4], action[0, 5], action[0, 6]]) #'right_j0', 'right_j1', 'right_j2', 'right_j3', 'right_j4', 'right_j5','right_j6'
         return torque_action
 
     def check_done(self):
         if self.distances < 0.1:
+            self.reward = 1
             return  True      
         else:
             return False
@@ -108,7 +101,7 @@ class REINFORCEEnv(SawyerReachXYZEnv):
 
     def _safe_move_to_neutral(self):
         self.send_gripper_cmd("open")
-        delay_cnt = 13 #reset delay
+        delay_cnt = 18 #reset delay cnt
         for i in range(delay_cnt):
             cur_pos, cur_vel, _ = self.request_observation()
             torques = self.AnglePDController._compute_pd_forces(cur_pos, cur_vel)
